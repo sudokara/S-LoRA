@@ -29,19 +29,19 @@ reset_allocation_log()
 rps_list = [56, 60, 64, 68]
 
 for rps in tqdm(rps_list):
-    TRACE_FILE = f"/home/azureuser/localfiles/S-LoRA/benchmarks/5h/uniform_poisson_{rps}.0_900_100_adapters.csv"
-    servers = [
-        "http://10.0.0.1:8000",
-        "http://10.0.0.2:8000",
-        "http://10.0.0.3:8000",
-        "http://10.0.0.4:8000",
-        "http://10.0.0.5:8000",
-        "http://10.0.0.6:8000",
-        "http://10.0.0.7:8000",
-        "http://10.0.0.8:8000",
-    ]
+    TRACE_FILE = f"/mnt/azureml/cr/j/a38c81c135ab437bbf7444755a941e24/exe/wd/S-LoRA/benchmarks/trace.csv"
+    # servers = [
+    #     "http://10.0.0.1:8000",
+    #     "http://10.0.0.2:8000",
+    #     "http://10.0.0.3:8000",
+    #     "http://10.0.0.4:8000",
+    #     "http://10.0.0.5:8000",
+    #     "http://10.0.0.6:8000",
+    #     "http://10.0.0.7:8000",
+    #     "http://10.0.0.8:8000",
+    # ]
     # servers = ["http://10.0.0.1:8000", "http://10.0.0.2:8000", "http://10.0.0.3:8000", "http://10.0.0.4:8000"]
-    # servers = ["http://10.0.0.1:8000", "http://10.0.0.2:8000"]
+    servers = ["http://10.0.0.1:8000", "http://10.0.0.2:8000"]
     server_map_folder = (
         f"server_maps/{TRACE_FILE.split('/')[-1].replace('.csv', '_server_maps')}"
     )
@@ -277,6 +277,9 @@ for rps in tqdm(rps_list):
     last_time = requests[0]
     prev_alloc = None
     prev_rank_assigned_instances = None
+    prev_server_adapter_sets = None  # list of sets, one per server index
+    all_transfer_logs = []  # accumulate per-step transfer logs
+    grand_total_transfers = 0
     debug = False
     probability_sum = defaultdict(
         list
@@ -301,6 +304,9 @@ for rps in tqdm(rps_list):
                     demand_tps.get(r.adapter_dir) + (r.prompt_len + r.output_len) / step
                 )
                 index += 1
+
+            # adapters that actually received requests in this window (pre-EMA)
+            requested_adapters = {adapter for adapter, tps in demand_tps.items() if tps > 0}
 
             for adapter, raw_tps in demand_tps.items():
                 history = adapter_window_history[adapter]
@@ -664,6 +670,36 @@ for rps in tqdm(rps_list):
                     f.write(f"  Server {servers[i]} max rank: {server_max_rank[i]}\n")
                 f.write("************************************\n\n")
 
+            # * compute adapter transfers (adapters that must be loaded because a request arrived but the adapter wasn't on that server before)
+            curr_server_adapter_sets = [
+                {adapter for adapter, _ in adapter_groups[i]}
+                for i in range(num_servers)
+            ]
+            transfer_log = {}  # server_url -> {transferred_adapters, num_transferred}
+            total_transfers = 0
+            with open("allocation_log.txt", "a") as f:
+                f.write(f"--- Adapter transfers (step {step_idx}) ---\n")
+                for i, server in enumerate(servers):
+                    if prev_server_adapter_sets is not None:
+                        new_adapters = curr_server_adapter_sets[i] - prev_server_adapter_sets[i]
+                    else:
+                        # step 0: all adapters on the server are new
+                        new_adapters = curr_server_adapter_sets[i]
+                    # only count as a transfer if the adapter actually got a request in this window
+                    transferred = sorted(new_adapters & requested_adapters)
+                    transfer_log[server] = {
+                        "transferred_adapters": transferred,
+                        "num_transferred": len(transferred),
+                    }
+                    total_transfers += len(transferred)
+                    if transferred:
+                        f.write(
+                            f"  Server {server}: {len(transferred)} transfers: {transferred}\n"
+                        )
+                transfer_log["total_transfers"] = total_transfers
+                f.write(f"  Total transfers across all servers: {total_transfers}\n")
+                f.write("--- End adapter transfers ---\n\n")
+
             # ensure_all_placed(adapter_groups)
             print(
                 f"All adapters placed successfully for step {step_idx} from time {last_time.req_time} to {req.req_time}"
@@ -724,6 +760,7 @@ for rps in tqdm(rps_list):
 
             prev_alloc = adapter_groups.copy()
             prev_rank_assigned_instances = rank_assigned_instances.copy()
+            prev_server_adapter_sets = curr_server_adapter_sets
             last_time = req
             alloc_end = time.time()
 
@@ -740,6 +777,13 @@ for rps in tqdm(rps_list):
                 f"{server_map_folder}/system/probability_sum_step_{step_idx}.json", "w"
             ) as f:
                 json.dump(probability_sum, f, indent=4)
+            # with open(
+            #     f"{server_map_folder}/system/transfer_log_step_{step_idx}.json", "w"
+            # ) as f:
+            #     json.dump(transfer_log, f, indent=4)
+
+            all_transfer_logs.append({"step": step_idx, **transfer_log})
+            grand_total_transfers += total_transfers
 
             step_idx += 1
 
@@ -777,3 +821,12 @@ for rps in tqdm(rps_list):
 
     with open(f"{server_map_folder}/contiguous/server_map.json", "w") as f:
         json.dump(contiguous_server_map, f, indent=4)
+
+    # write combined transfer log
+    combined_transfer_log = {
+        "steps": all_transfer_logs,
+        "grand_total_transfers": grand_total_transfers,
+    }
+    with open(f"{server_map_folder}/system/transfer_log.json", "w") as f:
+        json.dump(combined_transfer_log, f, indent=4)
+    print(f"Total transfers over all servers and all timesteps: {grand_total_transfers}")
