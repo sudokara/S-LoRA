@@ -30,14 +30,14 @@ class Lora_GPU():
         logging.critical("LoRA GPU Rank: {}".format(self.lora_rank))
 
         # normal LoRA weights
-        self.q_down = torch.empty( (self.batch_size, self.n_layers, self.in_size, self.lora_rank), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
-        self.q_up = torch.empty( (self.batch_size, self.n_layers, self.lora_rank, self.output_size), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
+        self.q_down = torch.zeros( (self.batch_size, self.n_layers, self.in_size, self.lora_rank), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
+        self.q_up = torch.zeros( (self.batch_size, self.n_layers, self.lora_rank, self.output_size), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
 
-        self.k_down = torch.empty( (self.batch_size, self.n_layers, self.in_size, self.lora_rank), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
-        self.k_up = torch.empty( (self.batch_size, self.n_layers, self.lora_rank, self.output_size), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
+        self.k_down = torch.zeros( (self.batch_size, self.n_layers, self.in_size, self.lora_rank), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
+        self.k_up = torch.zeros( (self.batch_size, self.n_layers, self.lora_rank, self.output_size), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
 
-        self.v_down = torch.empty( (self.batch_size, self.n_layers, self.in_size, self.lora_rank), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
-        self.v_up = torch.empty( (self.batch_size, self.n_layers, self.lora_rank, self.output_size), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
+        self.v_down = torch.zeros( (self.batch_size, self.n_layers, self.in_size, self.lora_rank), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
+        self.v_up = torch.zeros( (self.batch_size, self.n_layers, self.lora_rank, self.output_size), device=f"cuda:{self.device}", dtype=torch.float16).transpose(-1, -2).contiguous()
 
         # for prefill
         if not shared:
@@ -117,7 +117,7 @@ class Lora_GPU():
             
             self.share_progress()
 
-        self.select_inds = [ torch.randint(0,32,(i+1,), device="cuda")  for i in range(self.batch_size) ]
+        self.select_inds = [ torch.randint(0, self.batch_size, (i+1,), device="cuda")  for i in range(self.batch_size) ]
 
     def invoke_one_layer_q(self, x, layer_id, prefill=False):
         bsz = x.shape[0]
