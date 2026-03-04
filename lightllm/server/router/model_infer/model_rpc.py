@@ -1,6 +1,10 @@
 import asyncio
+import csv
+import logging
 import numpy as np
+import os
 import rpyc
+import time
 import torch
 import traceback
 from datetime import timedelta
@@ -150,6 +154,8 @@ class ModelRpcServer(rpyc.Service):
     def exposed_merge_lora_prefill(self, i):
         return self.model.gpu_lora.merge_lora_prefill(i)
 
+    _TIME_SPLIT_CSV = os.path.join(os.path.dirname(__file__), "time_split.csv")
+
     # @calculate_time(show=True, min_cost_ms=150)
     def forward(self, batch_id, is_prefill, aaas_mode=None):
         output_dict = {}
@@ -161,7 +167,48 @@ class ModelRpcServer(rpyc.Service):
         kwargs["aaas_mode"] = aaas_mode
         
         if len(run_req_ids) >= 1:
+            torch.cuda.synchronize()
+            ttft_start = time.time()
             logits = self.model.forward(**kwargs)
+            torch.cuda.synchronize()
+            ttft_ms = (time.time() - ttft_start) * 1000
+
+            # Log CPU vs GPU LoRA time breakdown
+            tb = kwargs.get("time_breakdown", {})
+            if tb and is_prefill:
+                gpu_lora_ms = tb.get("gpu_invoke", 0)
+                cpu_invoke_ms = tb.get("cpu_invoke_qkv", 0)
+                cpu_collect_ms = tb.get("collect", 0)
+                base_matmul_ms = tb.get("base_qkv_matmul", 0)
+                cpu_total_ms = cpu_invoke_ms + cpu_collect_ms
+                total_lora_ms = gpu_lora_ms + cpu_total_ms
+                gpu_layers = tb.get("gpu_lora_layers", 0)
+                cpu_layers = tb.get("cpu_lora_layers", 0)
+                logging.critical(
+                    f"[LORA TIME] gpu_lora={gpu_lora_ms:.1f}ms ({gpu_layers} layers) | "
+                    f"cpu_lora={cpu_total_ms:.1f}ms (invoke={cpu_invoke_ms:.1f}ms collect={cpu_collect_ms:.1f}ms, {cpu_layers} layers) | "
+                    f"base_qkv={base_matmul_ms:.1f}ms | "
+                    f"total_lora={total_lora_ms:.1f}ms | "
+                    f"gpu_pct={100*gpu_lora_ms/total_lora_ms:.1f}% cpu_pct={100*cpu_total_ms/total_lora_ms:.1f}%" if total_lora_ms > 0 else
+                    f"[LORA TIME] base_only, base_qkv={base_matmul_ms:.1f}ms"
+                )
+
+                # Append to time_split.csv
+                csv_path = self._TIME_SPLIT_CSV
+                write_header = not os.path.exists(csv_path)
+                with open(csv_path, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    if write_header:
+                        writer.writerow(["cpu_lora_ms", "gpu_lora_ms", "gpu_lora_layers", "cpu_lora_layers", "request_ttft_ms", "total_lora_ms"])
+                    writer.writerow([
+                        f"{cpu_total_ms:.2f}",
+                        f"{gpu_lora_ms:.2f}",
+                        gpu_layers,
+                        cpu_layers,
+                        f"{ttft_ms:.2f}",
+                        f"{total_lora_ms:.2f}",
+                    ])
+
             next_token_ids, next_token_probs = sample(logits, run_req_ids)
             next_token_ids = next_token_ids.detach().cpu().numpy()
             next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()

@@ -72,6 +72,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         # input shape: (batch_size*token_length, self.embed_dim_)
         # torch.cuda.synchronize()
         if "gpu_lora" in self.mode:
+            time_breakdown["gpu_lora_layers"] = time_breakdown.get("gpu_lora_layers", 0) + 1
             gpu_invoke_start = time.time()
             q_lora = self.gpu_lora.invoke_one_layer_q( input.view(infer_state.batch_size, -1, self.embed_dim_), self.layer_num_)
             q_lora = q_lora.view( -1, self.embed_dim_//self.world_size_ )
@@ -82,6 +83,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             gpu_invoke_end = time.time()
             time_breakdown["gpu_invoke"] = time_breakdown.get("gpu_invoke", 0) + (gpu_invoke_end - gpu_invoke_start)*1000
         elif "cpu_lora" in self.mode:
+            time_breakdown["cpu_lora_layers"] = time_breakdown.get("cpu_lora_layers", 0) + 1
             cpu_invoke_start = time.time()
             self.cpu_lora.invoke_lora_async(input, input.shape[0]//infer_state.batch_size, self.layer_num_, None, is_o=False)
             cpu_invoke_end = time.time()
@@ -91,12 +93,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 gpu_lora_prefill = False
                 if "prefill" in infer_state.aaas_mode:
                     gpu_lora_prefill = True
-                # wait_start = time.time()
-                # while self.gpu_lora.process_signal[0][0] < self.layer_num_ + 1:
-                #     logging.critical("Progress {}, {}".format( self.gpu_lora.process_signal[0][0], self.layer_num_))
-                #     pass
-                # wait_end = time.time()
-                # logging.critical( "Layer: {}. Waiting time: {}".format(self.layer_num_, 1000*(wait_end- wait_start)) )
+                time_breakdown["gpu_lora_layers"] = time_breakdown.get("gpu_lora_layers", 0) + 1
                 gpu_invoke_start = time.time()
                 if gpu_lora_prefill:
                     q_lora = self.gpu_lora.invoke_one_layer_q( input.view(infer_state.batch_size, -1, self.embed_dim_), self.layer_num_, gpu_lora_prefill)
@@ -118,6 +115,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                     logging.critical("Attention Layer {} use GPU, CPU: {},{}".format(self.layer_num_, self.count_use_gpu_lora, self.count_use_cpu_lora))
                 if aaas_use_gpu_lora and infer_state.aaas_mode != "cpu_lora_decode":
                     self.count_use_gpu_lora += 1
+                    time_breakdown["gpu_lora_layers"] = time_breakdown.get("gpu_lora_layers", 0) + 1
                     gpu_invoke_start = time.time()
                     q_lora = self.gpu_lora.invoke_one_layer_q( input.view(infer_state.batch_size, -1, self.embed_dim_), self.layer_num_, True)
                     q_lora = q_lora.view( -1, self.embed_dim_//self.world_size_ )
@@ -129,6 +127,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                     time_breakdown["gpu_invoke"] = time_breakdown.get("gpu_invoke", 0) + (gpu_invoke_end - gpu_invoke_start)*1000
                 else:
                     self.count_use_cpu_lora += 1
+                    time_breakdown["cpu_lora_layers"] = time_breakdown.get("cpu_lora_layers", 0) + 1
                     cpu_invoke_start = time.time()
                     self.cpu_lora.invoke_lora_async(input, input.shape[0]//infer_state.batch_size, self.layer_num_, None, is_o=False)
                     cpu_invoke_end = time.time()
@@ -142,9 +141,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                     # self.cpu_lora.invoke_lora_torch(lora_input, input.shape[0]//infer_state.batch_size, self.layer_num_, None)
                     # cpu_invoke_end = time.time()
                     # time_breakdown["cpu_invoke"] = time_breakdown.get("cpu_invoke", 0) + (cpu_invoke_end - cpu_invoke_start)*1000
+        base_mm_start = time.time()
         q = torch.mm(input.view(-1, self.embed_dim_), layer_weight.q_weight_) # shape ( batch_size*token_length, self.embed_dim_//world_size)
         k = torch.mm(input.view(-1, self.embed_dim_), layer_weight.k_weight_)
         v = torch.mm(input.view(-1, self.embed_dim_), layer_weight.v_weight_)
+        torch.cuda.synchronize()
+        time_breakdown["base_qkv_matmul"] = time_breakdown.get("base_qkv_matmul", 0) + (time.time() - base_mm_start)*1000
 
         if "cpu_lora" in self.mode or (infer_state.aaas_mode == "cpu_lora" and not aaas_use_gpu_lora) or (infer_state.aaas_mode == "cpu_lora_decode"):
             collect_start = time.time()
